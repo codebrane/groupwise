@@ -1,0 +1,605 @@
+/* CVS Header
+   $Id: email.cpp,v 1.14 2005-09-16 11:33:32 alistair Exp $
+   $Log: not supported by cvs2svn $
+   Revision 1.13  2004/09/15 15:14:19  alistair
+   NO_OF_ATTEMPTS reduced to 30 from 300
+
+   Revision 1.12  2004/09/06 15:01:22  alistair
+   Added logging - a work in progress
+
+   Revision 1.11  2003/09/24 12:24:56  alistair
+   v1.0.0.7 Now checks all STUx postoffices for user already there
+
+   Revision 1.10  2003/09/15 16:39:26  alistair
+   Sleeps for retry_interval now
+
+   Revision 1.9  2003/09/04 11:19:14  alistair
+   v1.0.0.6 - retry interval now specified on commandline
+
+   Revision 1.8  2003/08/25 15:07:31  alistair
+   v1.0.0.5 - NO_OF_ATTEMPTS added and set to 300 for a 5min window for creating users
+
+   Revision 1.7  2003/08/15 16:40:00  alistair
+   Updated delete user comments
+
+   Revision 1.6  2003/08/15 11:10:37  alistair
+   Fixed bug in mode comparison
+   Removed user object commit after delete - object doesn't exist!
+
+   Revision 1.5  2003/08/15 10:07:56  alistair
+   Extra parameter added to end of commandline : mode
+   Can now delete users from groupwise, nds or both
+   Comments added and updated
+   Released as v1.0.0.4
+
+   Revision 1.4  2003/08/11 15:54:21  alistair
+   Fully functional commandline app for creating groupwise accounts
+
+*/
+
+/* Email
+ *
+ * Commandline program to create a Groupwise account from an existing NDS account. The program can also delete
+ * Groupwise and/or NDS accounts.
+ *
+ * Args:
+ * Groupwise server - this is the full path to wpdomain.db on the server
+ * Groupwise ID - make this the same as the Novell CN
+ * DN of user in NDS - this is in dotted notation, not the comma notation of LDAP
+ * Groupwise password - make this the same as the Novell password
+ * Domain - the name of the domain in which to create the user
+ * Post office - the name of the postoffice in which to create the user.
+ * Visibility - either "domain" or "system"
+ * Mode - one of: "adduser"  - create a Groupwise account for the existing NDS user
+ *                "delgw"    - delete the specified Groupwise user
+ *                "delnds"   - delete the NDS account for the specified user
+ *                "delgwnds" - dekete the Groupwise and NDS accounts for the specified user
+ * In all the delete modes, the program uses the "DN of user in NDS" commandline argument to locate the user in
+ * the specified domain, to find out what postoffice they're in.
+ * When using "delnds" or "delgwnds", the user's home directory will not be affected. Only their NDS account will
+ * be deleted.
+ * User object commit wait in seconds - how long to wait before trying to commit user changed in Groupwise
+ *
+ * Sample commandlines:
+ *
+ * To add user eo666666, whose NDS DN is cn=eo666666,ou=students,ou=eo,ou=mid,o=uhi:
+ * email.exe \\gw3\mail\grpwise\stu eo666666 eo666666.students.eo.mid.uhi testpass student stu1 domain adduser 60
+ *
+ * To delete the Groupwise account of user eo666666, whose NDS DN is cn=eo666666,ou=students,ou=eo,ou=mid,o=uhi:
+ * email.exe \\gw3\mail\grpwise\stu eo666666 eo666666.students.eo.mid.uhi -- student -- -- delgw 0
+ *
+ * To delete the NDS account of user eo666666, whose NDS DN is cn=eo666666,ou=students,ou=eo,ou=mid,o=uhi:
+ * email.exe \\gw3\mail\grpwise\stu eo666666 eo666666.students.eo.mid.uhi -- student -- -- delnds 0
+ *
+ * To delete the NDS and Groupwise accounts of user eo666666, whose NDS DN is cn=eo666666,ou=students,ou=eo,ou=mid,o=uhi:
+ * email.exe \\gw3\mail\grpwise\stu eo666666 eo666666.students.eo.mid.uhi -- student -- -- delgwnds 0
+ *
+ * The program returns 0 if successful, otherwise a number less than 0
+ *
+ * AWY
+ *
+ * 1.0.0.8 16/08/04 When deleting a user, it now does a lookup on their NDS DN to find their postoffice
+ *                  "delgw", "delnds" and "delgwnds" commandline arguments now handled
+ *                  Updated the comments and sample commandlines
+ *                  Added log file - writes to email-<date><time>.txt
+ *                  NO_OF_ATTEMPTS reduced to 30 from 300
+ * 1.0.0.7 24/09/03 Now checks if user already exists in all STUx postoffices
+ * 1.0.0.6 04/09/03 Interval to wait before committing user object now on commandline
+ * 1.0.0.5 25/08/03 NO_OF_ATTEMPTS added and set to 300 for a 5min window for creating users
+ * 1.0.0.4 15/08/03 Added user deletion capabilities
+ * 1.0.0.3 05/08/03 Modified to take FE students into account. They have to be DOMAIN visible   
+ * 1.0.0.0 31/07/03 Created
+ */
+
+#include "stdafx.h"
+#include "gwadapi.h"
+#include "email.h"
+
+// Return codes
+#define OK                                0
+#define OK_WITH_UPDATED_VISIBILITY        1
+#define ERROR_COM_INIT                    -1
+#define ERROR_CANT_CONNECT_TO_SERVER      -2
+#define ERROR_CANT_GET_USERS_INTERFACE    -3
+#define ERROR_CANT_ADD_USER               -4
+#define ERROR_CANT_SET_DOMAIN_VISIBILITY  -5
+#define ERROR_CANT_GET_USER_INTERFACE     -6
+#define ERROR_CANT_COMMIT_USER_OBJECT     -7
+#define ERROR_USER_ALREADY_EXISTS         -8
+#define ERROR_CANT_COMMIT_SYSTEM_OBJECT   -9
+#define ERROR_USER_NOT_FOUND              -10
+#define ERROR_CANT_GET_USER_OBJECT        -11
+
+// Mode definitions for the commandline
+#define MODE_ADD_USER           "adduser"
+#define MODE_DELETE_USER_GW     "delgw"
+#define MODE_DELETE_USER_NDS    "delnds"
+#define MODE_DELETE_USER_GWNDS  "delgwnds"
+
+// Command line parameters - argv[0] is always the program name
+#define INDEX_GWSERVER    1 // UNC path to the server that holds the domain/post offices
+#define INDEX_GWID        2 // ID to log into Groupwise with. Should be the same as the Novell ID
+#define INDEX_NDSDN       3 // DN of the user in NDS (e.g. cn=EO666666.students.eo.mid.uhi)
+#define INDEX_PASSWORD    4 // Password for the Groupwise account. Should be the same as the Novell password
+#define INDEX_DOMAIN      5 // Domain where the post office is
+#define INDEX_POSTOFFICE  6 // Post office to create the user in
+#define INDEX_VISIBILITY  7 // Visibility of the user. Can be "po", "domain", "none" or "system"
+#define INDEX_MODE        8 // Can be MODE_DELETE_USER_GW, MODE_DELETE_USER_NDS, MODE_DELETE_USER_GWNDS, MODE_ADD_USER
+#define INDEX_RETRY_WAIT  9 // Number of seconds to wait before trying to commit the user object
+
+// User visibility
+#define VISIBILITY_SYSTEM "system"
+#define VISIBILITY_DOMAIN "domain"
+#define VISIBILITY_PO     "po"
+#define VISIBILITY_NONE   "none"
+
+// For the log file
+#define NEWLINE             "\n"
+#define DATE_SEPARATOR      ","
+#define TIME_SEPARATOR      ":"
+#define FILENAME_SEPARATOR  "-"
+#define FILENAME_EXT        ".txt"
+
+// For GetTime()
+#define FILENAME          1
+#define LOGFILE           2
+
+// Dummy Groupwise mailbox ID. Groupwise will create it's own one
+#define DUMMY_MAILBOX_ID  "o0o"
+
+// Number of times we'll try to add the user - to account for NDS delays
+#define NO_OF_ATTEMPTS  60
+
+TCHAR* ConvertToAnsi(OLECHAR* szW)
+{
+	static char achA[STRCONVERT_MAXLEN]; 
+	WideCharToMultiByte(CP_ACP, 0, szW, -1, achA, STRCONVERT_MAXLEN, NULL, NULL);  
+	return achA; 
+}
+
+OLECHAR* ConvertToUnicode(TCHAR* szA)
+{
+	static OLECHAR achW[STRCONVERT_MAXLEN]; 
+	MultiByteToWideChar(CP_ACP, 0, szA, -1, achW, STRCONVERT_MAXLEN);  
+	return achW; 
+}
+
+/* GWInit
+ *
+ * This function will set up COM and the groupwise client
+ *
+ * Params:
+ * lpszDomain - Pointer to the name of the domain to connect to, e.g. \\sm_srv1\mail\grpwise\sm_dom
+ *
+ * Returns:
+ * If the function succeeds it returns OK, otherwise an error value less than 0
+ */
+int GWInit (char* lpszDomain)
+{
+	VARIANT 	txtPath;
+
+	// Initialize COM
+	CoInitialize (NULL);
+
+	// Create an instance of the Groupwise System object
+	if (FAILED (CoCreateInstance (CLSID_System,
+								                NULL,
+								                CLSCTX_INPROC_SERVER | CLSCTX_INPROC_HANDLER | CLSCTX_LOCAL_SERVER,
+								                IID_IADSystem,
+								                (void**)&pIGWSystem)))
+		return ERROR_COM_INIT;
+
+  // Initialize and handle OLE strings
+	VariantInit (&txtPath);
+	V_VT(&txtPath) = VT_BSTR;
+	V_BSTR(&txtPath) = SysAllocString (TO_OLE_STRING (lpszDomain));
+
+	// Connect to the Groupwise server
+	if(!SUCCEEDED (pIGWSystem->Connect (txtPath)))
+  {
+    GWExit();
+		return ERROR_CANT_CONNECT_TO_SERVER;
+  }
+
+	return OK;
+}
+
+
+
+/* GWExit
+ *
+ * This function cleans everything up - COM, Groupwise client, memory etc.
+ *
+ * Params:
+ * NONE
+ *
+ * Returns:
+ * NOTHING
+ */
+void GWExit()
+{
+	// Release the System object...
+	if (pIGWSystem)
+		pIGWSystem->Release();
+
+  // ...the Users object
+	if (pIGWUsers)
+		pIGWUsers->Release();
+
+  // ...and the User object
+	if (pIGWUser)
+		pIGWUser->Release();
+
+	// Unintialize COM
+	CoUninitialize();
+}
+
+
+
+
+/* UserExistsInPostoffice
+ *
+ * This function will check to see if the specified user exists in the system
+ *
+ * Params:
+ * gwID - The Groupwise ID of the user, e.g. SM000009
+ * vPostoffice - The name of the postoffice to search, e.g. stu1
+ * vDomain - The name of the domain to search, e.g. student
+ *
+ * Returns:
+ * TRUE = user exists
+ * FALSE = user doesn't exist
+ */
+BOOL UserExistsInPostoffice (BSTR gwID, VARIANT vPostoffice, VARIANT vDomain)
+{
+  DIADUser *pDIADUser = NULL;
+  BOOL bReturn;
+
+  // Search for the user
+  if (SUCCEEDED (pIGWUsers->Item (gwID, vPostoffice, vDomain, &pDIADUser)))
+    bReturn = true;
+  else
+    bReturn = false;
+
+  return bReturn;
+}
+
+int StringToInt (char* pString)
+{
+  int result = 0;
+
+  while (*pString >= '0' && *pString <= '9')
+  {
+    result = (result * 10) + (*pString - '0');
+    pString++;
+  }
+
+  return result;
+}
+
+/* GetTime
+ *
+ * This function returns the current date and time with different separators depending on
+ * what the date/time is going to be used for.
+ *
+ * Params:
+ * inMode - Defines what separators to use
+ * lpszBuffer - Get the formatted date and time back in this
+ *
+ * Rturns:
+ * Returns the formatted date and time in lpszBuffer
+ */
+void GetTime (int inMode, LPSTR lpszBuffer)
+{
+  SYSTEMTIME  systemTime;
+  char        daysOfWeek[7][10] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  char        monthsOfYear[12][4] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+  GetSystemTime (&systemTime);
+
+  switch (inMode)
+  {
+    case FILENAME:
+      sprintf (lpszBuffer, "%s%s%s%s%d%s%s%s%d%s%d%s%d%s%d%s", "email-log", FILENAME_SEPARATOR,
+                                                               daysOfWeek[systemTime.wDayOfWeek], FILENAME_SEPARATOR,
+                                                               systemTime.wDay, FILENAME_SEPARATOR,
+                                                               monthsOfYear[systemTime.wMonth], FILENAME_SEPARATOR,
+                                                               systemTime.wYear, FILENAME_SEPARATOR,
+                                                               systemTime.wHour, FILENAME_SEPARATOR,
+                                                               systemTime.wMinute, FILENAME_SEPARATOR,
+                                                               systemTime.wSecond, FILENAME_EXT);
+      break;
+
+    case LOGFILE:
+      sprintf (lpszBuffer, "%s%s%d%s%s%s%d%s%d%s%d%s%d", daysOfWeek[systemTime.wDayOfWeek], DATE_SEPARATOR,
+                                                         systemTime.wDay, DATE_SEPARATOR,
+                                                         monthsOfYear[systemTime.wMonth], DATE_SEPARATOR,
+                                                         systemTime.wYear, DATE_SEPARATOR,
+                                                         systemTime.wHour, TIME_SEPARATOR,
+                                                         systemTime.wMinute, TIME_SEPARATOR,
+                                                         systemTime.wSecond);
+      break;
+  }
+}
+
+
+/* _tmain
+ *
+ * Main program entry point. Action starts here!
+ *
+ * Params:
+ * argv - our commandline parameters in an array
+ *
+ * Returns:
+ * The program returns one of the return codes listed at the top of this file
+ */
+int _tmain (int argc, _TCHAR* argv[])
+{
+	int         result;
+  ofstream    logFile;
+	DIADUsers   *pDIADUsers = NULL;
+	DIADUser    *pDIADUser = NULL;
+	VARIANT     password;
+	VARIANT     postOffice;
+  VARIANT     vSTU1postOffice;
+  VARIANT     vSTU2postOffice;
+  VARIANT     vSTU3postOffice;
+  VARIANT     vSTU4postOffice;
+  VARIANT     vSTU5postOffice;
+  VARIANT     vSTU6postOffice;
+  VARIANT     vSTU7postOffice;
+  VARIANT     vSTU8postOffice;
+	VARIANT     domain;
+	VARIANT     mailboxID;
+  VARIANT     tree;
+  BOOL        userAdded = false;
+  BOOL        userValid = false;
+  int         attempts = 0;
+  int         retry_interval = (1000 * StringToInt (argv[INDEX_RETRY_WAIT]));
+  char        szDateAndTime[255];
+
+  // Create the log file
+  GetTime (FILENAME, szDateAndTime);
+  //logFile.open (szDateAndTime);
+
+  // Initialise and connect to the Groupwise server
+  result = GWInit (argv[INDEX_GWSERVER]);
+
+  // If we didn't initialise report the error and shutdown
+  if (result < OK)
+  {
+    //GetTime (LOGFILE, szDateAndTime);
+    //logFile << "Failed to initialise COM : result = " << result << " : " << szDateAndTime;
+    //logFile.close();
+    return result;
+  }
+
+  // Initialise the params for sending to Groupwise
+	VariantInit (&password);
+	VariantInit (&postOffice);
+  VariantInit (&vSTU1postOffice);
+  VariantInit (&vSTU2postOffice);
+  VariantInit (&vSTU3postOffice);
+  VariantInit (&vSTU4postOffice);
+  VariantInit (&vSTU5postOffice);
+  VariantInit (&vSTU6postOffice);
+  VariantInit (&vSTU7postOffice);
+  VariantInit (&vSTU8postOffice);
+	VariantInit (&domain);
+	VariantInit (&mailboxID);
+  VariantInit (&tree);
+	V_VT(&password) = VT_BSTR;
+	V_VT(&postOffice) = VT_BSTR;
+	V_VT(&domain) = VT_BSTR;
+	V_VT(&mailboxID) = VT_BSTR;
+  V_VT(&tree) = VT_BSTR;
+
+  // Get a pointer to the Users Dispatch interface...
+	pIGWSystem->get_Users (&pDIADUsers);
+  // ...to get a pointer to the Users interface
+	if (SUCCEEDED (pDIADUsers->QueryInterface (IID_IADUsers, (void**)&pIGWUsers)))
+		pDIADUsers->Release();
+	else
+  {
+    //logFile << "Failed to get a pointer to the Users Dispatch interface";
+		GWExit();
+    //logFile.close();
+		return ERROR_CANT_GET_USERS_INTERFACE;
+	}
+
+  // Get ready to talk to Groupwise
+	V_BSTR(&password) = SysAllocString (TO_OLE_STRING (argv[INDEX_PASSWORD]));
+	V_BSTR(&postOffice) = SysAllocString (TO_OLE_STRING (argv[INDEX_POSTOFFICE]));
+  V_BSTR(&vSTU1postOffice) = SysAllocString (TO_OLE_STRING ("STU1"));
+  V_BSTR(&vSTU2postOffice) = SysAllocString (TO_OLE_STRING ("STU2"));
+  V_BSTR(&vSTU3postOffice) = SysAllocString (TO_OLE_STRING ("STU3"));
+  V_BSTR(&vSTU4postOffice) = SysAllocString (TO_OLE_STRING ("STU4"));
+  V_BSTR(&vSTU5postOffice) = SysAllocString (TO_OLE_STRING ("STU5"));
+  V_BSTR(&vSTU6postOffice) = SysAllocString (TO_OLE_STRING ("STU6"));
+  V_BSTR(&vSTU7postOffice) = SysAllocString (TO_OLE_STRING ("STU7"));
+  V_BSTR(&vSTU8postOffice) = SysAllocString (TO_OLE_STRING ("STU8"));
+	V_BSTR(&domain) = SysAllocString (TO_OLE_STRING (argv[INDEX_DOMAIN]));
+	V_BSTR(&mailboxID) = SysAllocString (TO_OLE_STRING (DUMMY_MAILBOX_ID));
+  V_BSTR(&tree) = SysAllocString (TO_OLE_STRING ("UHI_NDS_TREE"));
+	BSTR gwUserID = SysAllocString (TO_OLE_STRING (argv[INDEX_GWID]));
+	BSTR ndsDN = SysAllocString (TO_OLE_STRING (argv[INDEX_NDSDN]));
+  BSTR gwID = SysAllocString (TO_OLE_STRING (argv[INDEX_GWID]));
+
+  // Do we just need to delete the user?
+  if ( (!(strcmp (argv[INDEX_MODE], MODE_DELETE_USER_GW)))  ||
+       (!(strcmp (argv[INDEX_MODE], MODE_DELETE_USER_NDS))) ||
+       (!(strcmp (argv[INDEX_MODE], MODE_DELETE_USER_GWNDS))) )
+  {
+    StoreTypeConstants deleteMode;
+    BSTR givenname;
+    BSTR sn;
+
+    //logFile << "Delete request received for : " << ndsDN << " : " << argv[INDEX_MODE] << NEWLINE;
+
+    // Find the user in the postoffice
+    if (SUCCEEDED (pIGWUsers->ItemByDN (ndsDN, tree, &pDIADUser)))
+    {
+      // If we found them, get a pointer to the user object for them
+	    if (SUCCEEDED (pDIADUser->QueryInterface (IID_IADUser, (void**)&pIGWUser)))
+      {
+        // Release the interface - don't need it now
+		    pDIADUser->Release();
+
+        // Get their details
+        pIGWUser->get_GivenName (&givenname);
+        pIGWUser->get_Surname (&sn);
+
+        //logFile << "Found " << ndsDN << " : " << givenname << " : " << sn << NEWLINE;
+
+        // Delete the user... eadNDS eadGW eadBothNDSandGW
+        if (!(strcmp (argv[INDEX_MODE], MODE_DELETE_USER_GW))) deleteMode = eadGW;
+        if (!(strcmp (argv[INDEX_MODE], MODE_DELETE_USER_NDS))) deleteMode = eadNDS;
+        if (!(strcmp (argv[INDEX_MODE], MODE_DELETE_USER_GWNDS))) deleteMode = eadBothNDSandGW;
+        if (SUCCEEDED (pIGWUser->Delete (deleteMode)))
+        {
+          //logFile << "Deleted : " << ndsDN << NEWLINE;
+          // ...and update the system
+          if (SUCCEEDED (pIGWSystem->Commit()))
+          {
+            //logFile << "System Commit fine for " << ndsDN << NEWLINE;
+            result = OK;
+          }
+          else
+          {
+            //logFile << "Can't do a System Commit for  " << ndsDN << " : user may not be deleted" << NEWLINE;
+            result = ERROR_CANT_COMMIT_SYSTEM_OBJECT;
+          }
+        }
+      }
+      else
+      {
+        //logFile << "Found " << ndsDN << " but can't get a pointer to the user object" << NEWLINE;
+        result = ERROR_CANT_GET_USER_OBJECT;
+      }
+    }
+    else
+    {
+      //logFile << "User " << ndsDN << " doesn't exist in any Groupwise postoffices" << NEWLINE;
+      result = ERROR_USER_NOT_FOUND;
+    }
+
+    // Clean up...
+    //logFile << "Finished";
+	  GWExit();
+    //logFile.close();
+
+    // ...and return the result
+	  return result;
+
+  } // if ( (argv[INDEX_MODE] == MODE_DELETE_USER_GW) ...
+
+  // Default mode is adding a user so first check if the user already exists in all possible postoffices
+  if ((UserExistsInPostoffice (gwID, postOffice, domain))      ||
+      (UserExistsInPostoffice (gwID, vSTU1postOffice, domain)) ||
+      (UserExistsInPostoffice (gwID, vSTU2postOffice, domain)) ||
+      (UserExistsInPostoffice (gwID, vSTU3postOffice, domain)) ||
+      (UserExistsInPostoffice (gwID, vSTU4postOffice, domain)) ||
+      (UserExistsInPostoffice (gwID, vSTU5postOffice, domain)) ||
+      (UserExistsInPostoffice (gwID, vSTU6postOffice, domain)) ||
+      (UserExistsInPostoffice (gwID, vSTU7postOffice, domain)) ||
+      (UserExistsInPostoffice (gwID, vSTU8postOffice, domain)))
+  {
+    //logFile << "Trying to add gwID but the user already exists";
+    GWExit();
+    //logFile.close();
+    return ERROR_USER_ALREADY_EXISTS;
+  }
+
+  // Create the account. We'll try up to 100 times to take care of NDS delays
+  while ((!userAdded) && (attempts < NO_OF_ATTEMPTS))
+  {
+    //logFile << "Adding user : " << ndsDN << NEWLINE;
+
+    if (SUCCEEDED (pIGWUsers->AddExistingUser (gwUserID, ndsDN, password, postOffice, domain, mailboxID, &pDIADUser)))
+    {
+      //logFile << "Added user : " << ndsDN << " in postoffice " << postOffice.bstrVal << NEWLINE;
+
+      userAdded = true;
+
+      /* There is apparently a delay between Groupwise accepting the user and the user becoming a
+       * valid entity with attributes that can be manipulated. We'll know if it's become valid as the
+       * commit function will work. We'll try a few times to call commit. If it works then we can set
+       * various attributes of the user.
+       * We only need to do this if we've been told to set the user to a visibility other than system,
+       * which is the default visibility.
+       */
+      if (strcmp (argv[INDEX_VISIBILITY], VISIBILITY_SYSTEM))
+      {
+        // Get a handle on the User interface - this represents the user we've just added...
+        if (SUCCEEDED (pDIADUser->QueryInterface (IID_IADUser, (void**)&pIGWUser)))
+        {
+          // ...and release the dispatch interface. Don't need it any more
+		      pDIADUser->Release();
+
+          VisibilityTypeConstants vis;
+
+          attempts = 0;
+
+          // What visibility is required?
+          if (argv[INDEX_VISIBILITY] == VISIBILITY_DOMAIN)
+            vis = eadVisDomain;
+          if (argv[INDEX_VISIBILITY] == VISIBILITY_PO)
+            vis = eadVisPostOffice;
+          if (argv[INDEX_VISIBILITY] == VISIBILITY_NONE)
+            vis = eadVisNone;
+
+          // Keep trying...
+          while ((!userValid) && (attempts < NO_OF_ATTEMPTS))
+          {
+            // ...to commit the User object...
+            if (SUCCEEDED (pIGWUser->Commit()))
+            {
+              //logFile << "System Commit fine for " << ndsDN << NEWLINE;
+
+              /* ...then set the visibility of the user:
+               * HE = SYSTEM
+               * FE = DOMAIN
+               */
+              if (SUCCEEDED (pIGWUser->put_Visibility (eadVisDomain)))
+              {
+                // ...then commit the user again
+                if (SUCCEEDED (pIGWUser->Commit()))
+                {
+                  userValid = true;
+                  result = OK_WITH_UPDATED_VISIBILITY;
+                }
+              }
+            }
+
+            // Try to commit the User object again
+            attempts++;
+            Sleep (retry_interval);
+          }
+
+          if (!userValid)
+            result = ERROR_CANT_COMMIT_USER_OBJECT;
+        } // if (SUCCEEDED (pDIADUser->QueryInterface (IID_IADUser, (void**)&pIGWUser)))
+        else
+          result = ERROR_CANT_GET_USER_INTERFACE;
+      } // if (argv[INDEX_VISIBILITY] != VISIBILITY_SYSTEM)
+      else
+        result = OK;
+    } // if (SUCCEEDED (pIGWUsers->AddExistingUser ...
+    else
+    {
+      attempts++;
+      result = ERROR_CANT_ADD_USER;
+      Sleep (retry_interval);
+    }
+  } // while ((!userAdded) && (attempts < NO_OF_ATTEMPTS))
+
+  // Update the system. Failure to do this will result in a delay before Groupwise displays the user in Console1
+  pIGWSystem->Commit();
+
+  // Clean up
+	GWExit();
+
+  // Return the result code
+	return result;
+}
+

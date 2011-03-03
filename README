@@ -1,0 +1,53 @@
+Groupwise Account Creation
+==========================
+
+o Introduction
+o Program arguments
+o Sample commandlines
+o More information
+
+Introduction
+------------
+email is a commandline program to create a Groupwise account from an existing NDS account. The program can also delete
+Groupwise and/or NDS accounts.
+
+
+Program arguments
+-----------------
+Groupwise server - this is the full path to wpdomain.db on the server
+Groupwise ID - make this the same as the Novell CN
+DN of user in NDS - this is in dotted notation, not the comma notation of LDAP
+Groupwise password - make this the same as the Novell password
+Domain - the name of the domain in which to create the user
+Post office - the name of the postoffice in which to create the user.
+Visibility - either "domain" or "system"
+Mode - one of: "adduser"  - create a Groupwise account for the existing NDS user
+               "delgw"    - delete the specified Groupwise user
+               "delnds"   - delete the NDS account for the specified user
+               "delgwnds" - dekete the Groupwise and NDS accounts for the specified user
+
+In all the delete modes, the program uses the "DN of user in NDS" commandline argument to locate the user in
+the specified domain, to find out what postoffice they're in.
+When using "delnds" or "delgwnds", the user's home directory will not be affected. Only their NDS account will
+be deleted.
+User object commit wait in seconds - how long to wait before trying to commit user changed in Groupwise
+ 
+Sample commandlines
+-------------------
+To add user 666666, whose NDS DN is cn=666666,ou=students,ou=here,ou=there,o=someorg:
+email.exe \\gwserver\mail\grpwise\postofficename 666666 666666.students.here.there.someorg testpass student postofficename domain adduser 60
+ 
+To delete the Groupwise account of user 666666, whose NDS DN is cn=666666,ou=students,ou=here,ou=there,o=someorg:
+email.exe \\gwserver\mail\grpwise\postofficename 666666 666666.students.here.there.someorg -- student -- -- delgw 0
+ 
+To delete the NDS account of user 666666, whose NDS DN is cn=666666,ou=students,ou=here,ou=there,o=someorg:
+email.exe \\gwserver\mail\grpwise\postofficename 666666 666666.students.here.there.someorg -- student -- -- delnds 0
+ 
+To delete the NDS and Groupwise accounts of user 666666, whose NDS DN is cn=666666,ou=students,ou=here,ou=there,o=someorg:
+email.exe \\gwserver\mail\grpwise\postofficename 666666 666666.students.here.there.someorg -- student -- -- delgwnds 0
+ 
+The program returns 0 if successful, otherwise a number less than 0
+
+More information
+----------------
+http://codebrane.com/blog

@@ -1,0 +1,22 @@
+Microsoft Visual Studio Solution File, Format Version 10.00
+# Visual Studio 2008
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "email", "email.vcproj", "{33ED9B05-A381-4263-AF56-3B7371053E2D}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Win32 = Debug|Win32
+		Release|Win32 = Release|Win32
+		test|Win32 = test|Win32
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{33ED9B05-A381-4263-AF56-3B7371053E2D}.Debug|Win32.ActiveCfg = Debug|Win32
+		{33ED9B05-A381-4263-AF56-3B7371053E2D}.Debug|Win32.Build.0 = Debug|Win32
+		{33ED9B05-A381-4263-AF56-3B7371053E2D}.Release|Win32.ActiveCfg = Release|Win32
+		{33ED9B05-A381-4263-AF56-3B7371053E2D}.Release|Win32.Build.0 = Release|Win32
+		{33ED9B05-A381-4263-AF56-3B7371053E2D}.test|Win32.ActiveCfg = test|Win32
+		{33ED9B05-A381-4263-AF56-3B7371053E2D}.test|Win32.Build.0 = test|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
