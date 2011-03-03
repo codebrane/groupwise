@@ -10,7 +10,8 @@ Introduction
 ------------
 email is a commandline program to create a Groupwise account from an existing NDS account. The program can also delete
 Groupwise and/or NDS accounts.
-
+I've open sourced it but I no longer work on it and there won't be any updates to the source. It's here to
+help other work with the Groupwise COM API.
 
 Program arguments
 -----------------
